@@ -1,0 +1,198 @@
+---
+title: "app_template"
+author: "Taylor Kirk"
+format:
+  pdf: 
+    toc: true
+execute:
+    echo: false
+    warning: false
+---
+
+```{r setup}
+
+library(fpp3) # Tidyverts library that utilizes the fable, tsibble and feasts packages
+library(tidyverse)
+```
+
+This is the data to be used for the application.  There are 6622 observations and 4 variables.  The dataset is a tsibble, which is the Tidyverts version of a tibble for time series data.  Below are the columns and their descriptions
+
+- State: character column of each state in the US in the two character state abbreviation.  this is one of the keys of the tsibble
+
+- Commodity: The two commodities are Gas (Mcf) and Oil (bbl).  This is the other key in the tsibble
+
+- Date:  This is a month column in the format (2015 Jan).  This is the key of the tsibble and the date range of the series extends from 2015 Jan to 2025 May
+
+- Volume: This a numeric column that represents the volume of the commodity sold for that month.  It's in the units of the commodity which for oil is barrels (bbl) and for gas is 1000 cubic feet (mcf)
+
+```{r}
+oil_ts <- read_rds("cleaned_oil_ts")
+```
+
+# Tab 1: Initial Exploration
+
+The purpose of this tab will be to allow the user to explore the time series of their chosen state and commodity, as well as to view the STL Decomposition of a particular commodity either in the aggregate (for the whole US) or by state
+
+**UI Components**
+
+- Drop down multi-select for the state
+- drop down select box for commodity (single choice)
+- seperate drop down select for either a specific state or the whole US for the STL decomposition
+- slider to select the date range that applies to both the time series plot and STL decomp plot
+
+**Server Features**
+
+- User can view the time series plot, or they can toggle to switch to the STL decomposition
+- Rename `Gas (Mcf)`and `Oil (bbl)` commodities to Gas and Oil for clarity, but make sure that units are clear in the plots
+- Plotly does not integrate with tidyverts so we'll need to keep it to ggplot
+
+**Other**
+
+- use the below code for updating the dataframe and for how to get the STL decomp.  Feel free to take come creative liberties to make the plots clearer or richer with helpful details.  Below I've used the state of new mexico, you can use that as the default choice for both the time series and stl decomp
+- The mutated columns are to be used as predictors for TSLM modeling if the user wants to, which is the next tab.  create new variables for oil volume lagged by the same months as the Gas one below for when the user wants to model the Gas commodity and use Oil as a predictor
+
+```{r}
+
+oil_model <- oil_ts |> 
+  pivot_wider(
+    id_cols = c(Date, State), 
+    values_from = Volume, 
+    names_from = Commodity
+    ) |> 
+  mutate(
+    Month = month.abb[month(Date)],
+    Gas_Vol_Lag_one = lag(`Gas (Mcf)`, n = 1),
+    Gas_Vol_Lag_two = lag(`Gas (Mcf)`, n = 2),
+    Gas_Vol_Lag_six = lag(`Gas (Mcf)`, n = 6),
+    Gas_Vol_Lag_year = lag(`Gas (Mcf)`, n = 12))
+
+oil_model |> 
+  filter(State == 'NM') |> 
+  autoplot(`Oil (bbl)`) +
+  labs(title = 'New Mexico Oil Production') +
+  theme_minimal()
+
+
+oil_model |> 
+  filter(State == 'NM') |> 
+  model(STL(`Oil (bbl)`)) |> 
+  components() |> 
+  autoplot() +
+  labs(title = 'New Mexico Oil Production') +
+  theme_minimal()
+```
+
+# Tab 2: Modeling
+
+Purpose of this tab will be to allow the user to build models and compare training metrics
+
+**UI components**
+
+- single select for user to choose state and commodity they want to model
+- sliding scale to allow user to define the forecast period, which will define the training split
+- radio select box to allow user to choose if they want to train a TSLM or ETS model
+- Option to allow user to customize the model if they want
+  - For ETS, this would allow them to select the component types which for Error are Additive (A), Neutral (N) or Multiplicative (M), for Trend that's Additive (A), Additive damped (Ad) or Neutral (N), and for Season it's Additive (A), Neutral (N) or Multiplicative (M)
+  - For the TSLM model it's allowing the user to include trend(), season(), or one of the exogenous regressors from above (the lagged gas production variables).
+  
+**Server Features**
+
+- Output model specifications for the user
+- Output the model report() for the most recent model the user created
+- Output the accuracy() metrics as shown below
+
+**Other**
+
+- When building models, the default is to fit the model as autoselect.  don't show the custom parameters that the user could use for the model unless the check the customization box
+- Keep each model that the user builds and add each successive one to the accuracy metrics as they build it.  name each new model by the base model (TSLM or ETS) appended with the state abbreviation unique id number to denote the number models created in that session (1, 2, 3 etc)
+- Allow users to select previous models built to review the model report.  If none selected, then it the model report output is the most recent model built
+
+use the code below for guidance on how to split the data, model it, and output the model report and training metrics
+
+```{r}
+
+oil_trn <- oil_model |> filter(year(Date) < 2024)
+oil_tst <- oil_model |> filter(year(Date) >= 2024)
+oil_tst_nm <- oil_tst |> filter(State == 'NM')
+
+
+oil_fit <- oil_trn |> 
+  filter(
+    State == 'NM') |> 
+  model(
+    tslm = TSLM(`Oil (bbl)` ~ Gas_Vol_Lag_one + Month + trend()),
+    ets = ETS(`Oil (bbl)` ~ error('M') + trend('Ad') + season('M')) 
+  )
+
+oil_fit |> 
+  select(tslm) |> 
+  report()
+
+oil_fit |> 
+  accuracy() |> 
+  select(State, .model, ME:MAPE) |> 
+  gt() |> 
+  fmt_number(
+    columns = everything(),
+    sep_mark=",",
+    decimals = 3
+  ) |> 
+  cols_label(".model" = "Model") |> 
+  cols_align(align = "center") |> 
+  cols_width(everything() ~ px(110))
+```
+
+# Tab 3: Forecasting
+
+Purpose of this tab will be to allow the user to select the model or models they built on the previous tab, and compare their validation metrics on the forecast period selected in the previous tab and visualize their forecast performance
+
+**UI components**
+
+- multi-select for the models they built in the previous tab.  Can select up to 10
+- slider range to allow the user to adjust the range of the data that the forecast overlays (look to the plot code below)
+
+**Server Features**
+
+- output validation metric table using the code below
+- allow the user to compare up to 4 models visually using the plot below.  in the event they user selected more than 4 models, use only the first 4 models selected
+
+**Other**
+
+- in the event that the user chooses models that were trained on data from different states or commodities, make sure to update the plotting code below to accomodate that, and use free_y equal true to ensure the forecasts are on their own scale
+
+```{r}
+oil_fit |> 
+  forecast(new_data = oil_tst_nm) |> 
+  accuracy(oil_tst_nm) |> 
+  select(c(.model, ME, RMSE, MAE, MPE, MAPE)) |> 
+  gt(locale = 'en') |> 
+  cols_label(
+    .model = 'Model'
+  ) |> 
+  fmt_number(
+    columns = everything(),
+    sep_mark=",",
+    decimals = 2
+  ) |> 
+  cols_align(align = "center") |> 
+  cols_width(everything() ~ px(110))
+```
+
+
+```{r}
+oil_forecast <- oil_fit |> 
+  forecast(new_data = oil_tst_nm)
+
+oil_forecast |> 
+  autoplot() +
+  autolayer(oil_model |> filter(year(Date) > 2022, State == "NM"), `Oil (bbl)`) +
+  facet_wrap(~ .model, ncol = 1) +
+  theme_minimal()
+```
+
+
+# Tab 4: About
+
+Purpose of this tab is to inform the user about the data used and give them links to learn more.  Include the information and links here for the tidyverts library
+
+The raw monthly oil and gas production and disposition data (2015–2025) was originally provided by the U.S. Department of the Interior, Office of Natural Resources Revenue [DOIProduction](https://revenuedata.doi.gov/downloads/production-by-disposition/). The cleaned version of this dataset, which was used for the current analysis, was retrieved from the Kaggle repository [KaggleOilGas](https://www.kaggle.com/datasets/pinuto/us-oil-and-gas-production-and-disposition-20152025).
