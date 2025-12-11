@@ -55,7 +55,7 @@ commodities <- c("Oil", "Gas")
 
 ui <- page_navbar(
   title = "US Oil & Gas Production Analysis",
-  theme = bs_theme(version = 5, bootswatch = "flatly"),
+  theme = bs_theme(version = 5, bootswatch = "zephyr"),
   
   # --- Tab 1: Initial Exploration ---
   nav_panel(
